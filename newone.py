@@ -19,7 +19,7 @@ from telegram.ext import (
 
 # ----- Configuration & Globals -----
 BOT_TOKEN = "8108051087:AAFt6oxps6oWQU92Ez30lE2yhS4BesuwEFY"
-MODERATOR_ID = 123456789  # Replace with the actual moderator's Telegram chat id
+MODERATOR_ID = 1068291865  # Replace with the actual moderator's Telegram chat id
 
 # File names for data storage
 USERS_FILE = "user_registrations.json"

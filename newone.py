@@ -160,14 +160,14 @@ def schedule_jobs(application):
 
     scheduler.add_job(
         send_morning_reminder,
-        trigger=CronTrigger(hour=8, minute=0),
+        trigger=CronTrigger(hour=2, minute=57),
         args=[application],
         id="morning_reminder",
         replace_existing=True
     )
     scheduler.add_job(
         send_evening_reminder,
-        trigger=CronTrigger(hour=20, minute=0),
+        trigger=CronTrigger(hour=3, minute=0),
         args=[application],
         id="evening_reminder",
         replace_existing=True

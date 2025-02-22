@@ -92,7 +92,23 @@ async def reg_color(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Great! What's your favorite animal?")
     return REG_ANIMAL
 
-# ... (Same pattern for reg_animal, reg_sport) ...
+async def reg_animal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    animal = update.message.text.strip()
+    if not animal:
+        await update.message.reply_text("Please enter a valid animal.")
+        return REG_ANIMAL
+    context.user_data["animal"] = animal
+    await update.message.reply_text("Awesome! What's your favorite sport?")
+    return REG_SPORT
+
+async def reg_sport(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sport = update.message.text.strip()
+    if not sport:
+        await update.message.reply_text("Please enter a valid sport.")
+        return REG_SPORT
+    context.user_data["sport"] = sport
+    await update.message.reply_text("Cool! Lastly, what's your age?")
+    return REG_AGE
 
 async def reg_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)

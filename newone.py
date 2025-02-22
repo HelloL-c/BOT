@@ -1,301 +1,76 @@
-import os
-import json
-import csv
+import asyncio
 import logging
 from datetime import datetime, timedelta
+
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.cron import CronTrigger
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
-    ConversationHandler,
-)
-
-# ----- Configuration & Globals -----
-BOT_TOKEN = "8108051087:AAFt6oxps6oWQU92Ez30lE2yhS4BesuwEFY"
-MODERATOR_ID = 1068291865  # Replace with the actual moderator's Telegram chat id
-
-# File names for data storage
-USERS_FILE = "user_registrations.json"
-DIARY_FILE = "diary_entries.csv"
-
-# In-memory storage (loaded from file on startup)
-registered_users = {}  # key: chat_id, value: registration data
-pending_followup_jobs = {}  # keys like "morning_<chat_id>" or "evening_<chat_id>"
-
-# States for ConversationHandler
-CHOOSING_ENTRY_TYPE = 1
-ENTERING_DIARY = 2
-
-# Setup logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+BOT_TOKEN = "8108051087:AAFt6oxps6oWQU92Ez30lE2yhS4BesuwEFY"
 
-# ----- Utility Functions for Data Storage -----
-def load_users():
-    try:
-        with open(USERS_FILE, "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-
-
-def save_users(users):
-    with open(USERS_FILE, "w") as f:
-        json.dump(users, f)
-
-
-def log_diary_entry(chat_id, entry_type, text):
-    with open(DIARY_FILE, "a", newline="") as f:
-        writer = csv.writer(f)
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        writer.writerow([timestamp, chat_id, entry_type, text])
-
-
-# ----- Command Handlers -----
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    # Load users from disk
-    global registered_users
-    users = load_users()
-    registered_users = users  # Update our in-memory storage with persisted data
-
-    # Check if user has an incomplete registration
-    if chat_id in users:
-        keyboard = [
-            [
-                InlineKeyboardButton("Resume Registration", callback_data="resume"),
-                InlineKeyboardButton("Restart Registration", callback_data="restart"),
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "You already started registration. Do you want to resume or restart?",
-            reply_markup=reply_markup,
-        )
-    else:
-        # Start new registration
-        users[chat_id] = {"registered": True, "started_at": datetime.now().isoformat()}
-        save_users(users)
-        registered_users[chat_id] = users[chat_id]
-        await update.message.reply_text(
-            "Registration started. (For this demo, registration is marked complete.)\nYou are now registered to receive reminders and submit diary entries."
-        )
-
-
-async def registration_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    choice = query.data  # "resume" or "restart"
-    chat_id = str(query.message.chat.id)
-    users = load_users()
-    if choice == "restart":
-        # Restart registration: overwrite any previous data for this user
-        users[chat_id] = {"registered": True, "started_at": datetime.now().isoformat()}
-        await query.edit_message_text(
-            "Registration restarted. You are now registered to receive reminders and submit diary entries."
-        )
-    else:
-        await query.edit_message_text(
-            "Resuming your registration. You remain registered to receive reminders and submit diary entries."
-        )
-    save_users(users)
-    registered_users[chat_id] = users[chat_id]
-
-
-# ----- Diary Entry Logging -----
-async def diary_entry_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    if chat_id not in registered_users:
-        await update.message.reply_text(
-            "You are not registered. Please use /start to register."
-        )
-        return ConversationHandler.END
-    # Ask whether this is a morning or night entry
-    keyboard = [
-        [
-            InlineKeyboardButton("Morning Entry", callback_data="morning"),
-            InlineKeyboardButton("Night Entry", callback_data="night"),
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "Are you submitting a Morning Entry or Night Entry?", reply_markup=reply_markup
-    )
-    # Save the diary text in context to log after the choice
-    context.user_data["pending_entry"] = update.message.text
-    return CHOOSING_ENTRY_TYPE
-
-
-async def choose_entry_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    entry_type = query.data  # "morning" or "night"
-    chat_id = str(query.message.chat.id)
-    pending_text = context.user_data.get("pending_entry", "")
-    if not pending_text:
-        pending_text = "No text"
-    log_diary_entry(chat_id, entry_type.capitalize(), pending_text)
-    await query.edit_message_text(f"{entry_type.capitalize()} Entry saved!")
-    # Cancel any pending follow-up reminder job for this period, if it exists
-    job_id = f"{entry_type}_{chat_id}"
-    if job_id in pending_followup_jobs:
-        pending_followup_jobs[job_id].remove()
-        pending_followup_jobs.pop(job_id)
-    return ConversationHandler.END
-
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Operation cancelled.")
-    return ConversationHandler.END
-
-
-# ----- Reminder Functions -----
-async def send_reminder(context: ContextTypes.DEFAULT_TYPE, period: str):
-    if period == "morning":
-        form_link = "https://forms.gle/mxhuutCJ1xMwabig6"
-        message_text = f"Good morning! Please complete your diary entry:\n{form_link}"
-    elif period == "evening":
-        form_link = "https://forms.gle/xXyR7Crh5RfqgPH26"
-        message_text = f"Good evening! Please complete your diary entry:\n{form_link}"
-    else:
-        return
-
-    for chat_id in registered_users.keys():
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=message_text)
-            # Schedule follow-up reminder in 2 hours if no diary entry is received
-            job_id = f"{period}_{chat_id}"
-            if job_id in pending_followup_jobs:
-                pending_followup_jobs[job_id].remove()
-            trigger = DateTrigger(run_date=datetime.now() + timedelta(hours=2))
-            job = scheduler.add_job(
-                send_followup_reminder,
-                trigger=trigger,
-                args=[context, chat_id, period],
-                id=job_id,
-            )
-            pending_followup_jobs[job_id] = job
-        except Exception as e:
-            logger.error(f"Failed to send {period} reminder to {chat_id}: {e}")
-            await context.bot.send_message(
-                chat_id=MODERATOR_ID,
-                text=f"Error sending {period} reminder to {chat_id}: {e}",
-            )
-
-
-async def send_followup_reminder(
-    context: ContextTypes.DEFAULT_TYPE, chat_id: str, period: str
-):
-    try:
-        if period == "morning":
-            form_link = "https://forms.gle/mxhuutCJ1xMwabig6"
-            message_text = f"Follow-up: Good morning! Please don't forget to complete your diary entry:\n{form_link}"
-        elif period == "evening":
-            form_link = "https://forms.gle/xXyR7Crh5RfqgPH26"
-            message_text = f"Follow-up: Good evening! Please don't forget to complete your diary entry:\n{form_link}"
-        else:
-            return
-
-        await context.bot.send_message(chat_id=chat_id, text=message_text)
-    except Exception as e:
-        logger.error(f"Failed to send follow-up {period} reminder to {chat_id}: {e}")
-        await context.bot.send_message(
-            chat_id=MODERATOR_ID,
-            text=f"Error sending follow-up {period} reminder to {chat_id}: {e}",
-        )
-
-
-# ----- Scheduler Setup -----
+# Create a single, global APScheduler instance
 scheduler = AsyncIOScheduler()
 
+async def start_command(update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Hello! I'm running in a single event loop with APScheduler.")
 
-def schedule_reminders():
-    # Schedule daily morning reminder at 8:00 AM
+async def send_morning_reminder(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        # Example: broadcast to a known chat_id
+        chat_id = 1068291865  # Replace with real chat ID or iterate over your user list
+        await context.bot.send_message(chat_id=chat_id, text="Good morning reminder!")
+    except Exception as e:
+        logger.error(f"Error in morning reminder: {e}")
+
+async def send_evening_reminder(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = 1068291865
+        await context.bot.send_message(chat_id=chat_id, text="Good evening reminder!")
+    except Exception as e:
+        logger.error(f"Error in evening reminder: {e}")
+
+def schedule_jobs(application):
+    """
+    Schedule your APScheduler jobs. This function should be called
+    after the bot is created but before run_polling().
+    """
+    # You can also use a CronTrigger or IntervalTrigger
     scheduler.add_job(
-        send_reminder,
-        "cron",
-        hour=8,
-        minute=0,
-        args=[bot_context, "morning"],
-        id="daily_morning",
+        send_morning_reminder,
+        trigger=CronTrigger(hour=8, minute=0),  # 8:00 AM daily
+        args=[application],
+        id="morning_reminder"
     )
-    # Schedule daily evening reminder at 8:00 PM
     scheduler.add_job(
-        send_reminder,
-        "cron",
-        hour=20,
-        minute=0,
-        args=[bot_context, "evening"],
-        id="daily_evening",
+        send_evening_reminder,
+        trigger=CronTrigger(hour=20, minute=0), # 8:00 PM daily
+        args=[application],
+        id="evening_reminder"
     )
-    # Concluding reminder after 10 days could be scheduled here if needed
 
-
-# ----- Main Application Setup -----
 async def main():
-    global bot_context, registered_users
-    # Load existing users from disk at startup
-    registered_users = load_users()
-
+    """
+    The main async function that sets up the bot, scheduler, and starts polling.
+    """
+    # 1. Build the bot application
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Add command handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(
-        CallbackQueryHandler(registration_choice, pattern="^(resume|restart)$")
-    )
+    # 2. Add handlers
+    application.add_handler(CommandHandler("start", start_command))
 
-    # Conversation handler for diary entry logging
-    conv_handler = ConversationHandler(
-        entry_points=[
-            MessageHandler(filters.TEXT & ~filters.COMMAND, diary_entry_handler)
-        ],
-        states={
-            CHOOSING_ENTRY_TYPE: [
-                CallbackQueryHandler(choose_entry_type, pattern="^(morning|night)$")
-            ]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-    application.add_handler(conv_handler)
-
-    # Manual command handlers for testing reminders
-    application.add_handler(
-        CommandHandler(
-            "reminder_morning",
-            lambda update, context: send_reminder(context, "morning"),
-        )
-    )
-    application.add_handler(
-        CommandHandler(
-            "reminder_evening",
-            lambda update, context: send_reminder(context, "evening"),
-        )
-    )
-
-    # Start the scheduler before polling
-    global bot_context
-    bot_context = application.bot
+    # 3. Start the scheduler (tie it to the current event loop)
+    #    Make sure to do this before scheduling jobs
     scheduler.start()
 
-    # Schedule the daily reminders
-    schedule_reminders()
+    # 4. Schedule your jobs, passing 'application' so the job callbacks have access to the bot context
+    schedule_jobs(application)
 
-    # Run polling (expected to run 24/7)
+    # 5. Run the bot until you press Ctrl-C or the process receives SIGINT, SIGTERM or SIGABRT
     await application.run_polling()
 
-
 if __name__ == "__main__":
-    import asyncio
-
+    # 6. We only call asyncio.run(main()) once. This ensures a single event loop.
     asyncio.run(main())

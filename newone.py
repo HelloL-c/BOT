@@ -157,9 +157,9 @@ def main():
         entry_points=[CommandHandler("start", start_registration)],
         states={
             REG_COLOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_color)],
-            REG_ANIMAL: [...],  # same pattern
-            REG_SPORT: [...],
-            REG_AGE: [...]
+            REG_ANIMAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_animal)],  # same pattern
+            REG_SPORT: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_sport)],
+            REG_AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_age)]
         },
         fallbacks=[CommandHandler("cancel", reg_cancel)],
     )

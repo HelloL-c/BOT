@@ -228,6 +228,31 @@ def update_counts(chat_id, is_morning):
     return (m_count, n_count, is_done)
 
 #############################
+# 1) Simulate Unregistered + Append '50'
+#############################
+### ADDED ###
+def simulate_unregistered_and_append50(chat_id):
+    """
+    Wipes color, animal, sport, age so user appears unregistered.
+    Also appends '50' to their existing codename.
+    Resets morning/night counts to 0.
+    """
+    user = load_user(chat_id)
+    if user:
+        old_code = user["code"] or ""
+        new_code = old_code + "50"  # append '50'
+        save_user(
+            chat_id,
+            color="",      # blank out
+            animal="",
+            sport="",
+            age="",
+            code=new_code, # now code is old_code + '50'
+            morning_count=0,
+            night_count=0
+        )
+
+#############################
 # Registration Flow
 #############################
 
@@ -236,12 +261,16 @@ REG_COLOR, REG_ANIMAL, REG_SPORT, REG_AGE = range(4)
 async def start_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     user_data = load_user(chat_id)
-    if user_data:
+
+    ### CHANGED ###
+    # If user_data exists but color=="" => treat them as unregistered
+    if user_data and user_data["color"] != "":
+        # Already registered
         code = user_data["code"]
         keyboard = [
             [InlineKeyboardButton("Continue Diary Study", callback_data="cont_diary")],
             [InlineKeyboardButton("Restart Diary Study", callback_data="restart_diary")],
-            [InlineKeyboardButton("Change Codename", callback_data="change_code_start")]  # NEW
+            [InlineKeyboardButton("Change Codename", callback_data="change_code_start")]
         ]
         markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
@@ -251,6 +280,7 @@ async def start_registration(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return ConversationHandler.END
     else:
+        # If no user_data or color=="" => treat as unregistered
         await update.message.reply_text(
             "Welcome! Let’s get you registered.\nWhat's your favorite color?"
         )
@@ -273,9 +303,12 @@ async def handle_start_buttons(update: Update, context: ContextTypes.DEFAULT_TYP
             "You can wait for the next reminder to start submitting entries again."
         )
     elif choice == "change_code_start":
-        # Prompt user to type new code
-        await query.edit_message_text("Please type your new code:")
-        context.user_data["change_code_from_start"] = True
+        ### ADDED ###
+        simulate_unregistered_and_append50(chat_id)
+        await query.edit_message_text(
+            "We’ve wiped your data and appended '50' to your codename.\n"
+            "Please type /start again to register as if new."
+        )
 
 async def reg_color(update: Update, context: ContextTypes.DEFAULT_TYPE):
     color = update.message.text.strip()
@@ -344,8 +377,11 @@ async def morning_reminder(context: ContextTypes.DEFAULT_TYPE):
         for u in all_users:
             chat_id = u["chat_id"]
             code = u["code"]
+            # Add a "Contact Admin" button for participants
+            ### ADDED ###
             keyboard = [
-                [InlineKeyboardButton("Complete Morning Entry", callback_data=f"morning_{code}")]
+                [InlineKeyboardButton("Complete Morning Entry", callback_data=f"morning_{code}")],
+                [InlineKeyboardButton("Contact Admin", callback_data=f"contactadmin_{code}")]
             ]
             markup = InlineKeyboardMarkup(keyboard)
             await context.bot.send_message(
@@ -353,7 +389,7 @@ async def morning_reminder(context: ContextTypes.DEFAULT_TYPE):
                 text=(
                     f"Good morning!\n"
                     f"You are {code}, right?\n"
-                    "Click below to fill your morning diary."
+                    "Click below to fill your morning diary or contact admin."
                 ),
                 reply_markup=markup
             )
@@ -368,8 +404,11 @@ async def evening_reminder(context: ContextTypes.DEFAULT_TYPE):
         for u in all_users:
             chat_id = u["chat_id"]
             code = u["code"]
+            # Add a "Contact Admin" button for participants
+            ### ADDED ###
             keyboard = [
-                [InlineKeyboardButton("Complete Evening Entry", callback_data=f"evening_{code}")]
+                [InlineKeyboardButton("Complete Evening Entry", callback_data=f"evening_{code}")],
+                [InlineKeyboardButton("Contact Admin", callback_data=f"contactadmin_{code}")]
             ]
             markup = InlineKeyboardMarkup(keyboard)
             await context.bot.send_message(
@@ -377,7 +416,7 @@ async def evening_reminder(context: ContextTypes.DEFAULT_TYPE):
                 text=(
                     f"Good evening!\n"
                     f"You are {code}, correct?\n"
-                    "Tap below to fill your evening diary."
+                    "Tap below to fill your evening diary or contact admin."
                 ),
                 reply_markup=markup
             )
@@ -412,6 +451,32 @@ async def reminder_button_handler(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
     data = query.data
+
+    ### CHANGED ###
+    # If "contactadmin_CODE", handle that
+    if data.startswith("contactadmin_"):
+        parts = data.split("_", 1)  # ["contactadmin", "CODE"]
+        if len(parts) != 2:
+            await query.edit_message_text("Contact Admin: invalid data.")
+            return
+        user_code = parts[1]
+        chat_id = str(query.message.chat_id)
+
+        # Let admin know participant wants to contact them
+        admin_chat_id = ADMIN_ID
+        text_to_admin = (
+            f"Participant with codename {user_code} wants to contact you.\n"
+            f"Chat ID: {chat_id}\n"
+            "Use /admin -> 'Private Message a Participant' if you want to reply."
+        )
+        await context.bot.send_message(chat_id=admin_chat_id, text=text_to_admin)
+
+        # Also inform the participant
+        await query.edit_message_text(
+            "We’ve notified the admin you want to talk. They will message you soon!"
+        )
+        return
+
     parts = data.split("_")
     if len(parts) != 2:
         await query.edit_message_text("Invalid data. Please contact support.")
@@ -420,7 +485,7 @@ async def reminder_button_handler(update: Update, context: ContextTypes.DEFAULT_
     entry_type, user_code = parts
     chat_id = str(query.message.chat_id)
 
-    # Skip mismatch if code == "TEST" (Test scenario)
+    # Skip mismatch if code == "TEST"
     if user_code == "TEST":
         if entry_type == "morning":
             form_link = MORNING_FORM
@@ -568,6 +633,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if choice == "adm_check_progress":
         await show_all_users_progress(query)
     elif choice == "adm_find_code":
+        # We'll produce "adm_find_{code}" => 2 underscores => see next function
         await show_inline_all_codes(query, prefix="adm_find_")
     elif choice == "adm_reset_change":
         await show_inline_all_codes(query, prefix="adm_reset_change_")
@@ -606,6 +672,9 @@ async def show_all_users_progress(query):
         )
     await query.edit_message_text("\n".join(lines) or "No data.")
 
+### CHANGED ###
+# We'll produce "adm_find_{code}" => 2 underscores => "adm_find_BCR25"
+# Then we parse in admin_code_inline_handler with 3-part split
 async def show_inline_all_codes(query, prefix):
     users = get_all_users()
     if not users:
@@ -616,7 +685,9 @@ async def show_inline_all_codes(query, prefix):
     row = []
     for u in users:
         code = u["code"]
-        row.append(InlineKeyboardButton(code, callback_data=f"{prefix}{code}"))
+        # e.g. "adm_find_BCR25"
+        callback_data = f"{prefix}{code}"
+        row.append(InlineKeyboardButton(code, callback_data=callback_data))
         if len(row) == 3:
             buttons.append(row)
             row = []
@@ -646,77 +717,89 @@ def check_forgot_entries():
 #############################
 # Admin: inline code selection
 #############################
-
 async def admin_code_inline_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-    if "_" not in data:
+    ### CHANGED ###
+    # e.g. "adm_find_BCR25" => we do a 3-part split
+    # parts=["adm","find","BCR25"]
+    parts = data.split("_", 2)
+    if len(parts) < 3:
         # fallback
         keyboard = [[InlineKeyboardButton("Contact Admin", url="t.me/...")]]
         markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            "I received your button click but I don’t know how to handle it.\nNo underscore found.",
+            "I received your button click but I don’t know how to handle it.\nData format invalid.",
             reply_markup=markup
         )
         return
 
-    prefix, codename = data.split("_", 1)
+    prefix = parts[0]       # "adm"
+    subprefix = parts[1]    # "find" or "reset_change" or "private"
+    codename = parts[2]     # "BCR25"
 
-    if prefix == "adm_find":
-        user = load_user_by_code(codename)
-        if user:
-            m_count = user["morning_count"] or 0
-            n_count = user["night_count"] or 0
-            remain_m = max(0, TARGET_COUNT - m_count)
-            remain_n = max(0, TARGET_COUNT - n_count)
-            msg = (
-                f"Code: {codename}\n"
-                f"Morning: {m_count} (left {remain_m})\n"
-                f"Evening: {n_count} (left {remain_n})\n"
-                f"ChatID: {user['chat_id']}\n"
-                f"Color/Animal/Sport/Age: {user['color']}, {user['animal']}, {user['sport']}, {user['age']}"
+    if prefix == "adm":
+        if subprefix == "find":
+            user = load_user_by_code(codename)
+            if user:
+                m_count = user["morning_count"] or 0
+                n_count = user["night_count"] or 0
+                remain_m = max(0, TARGET_COUNT - m_count)
+                remain_n = max(0, TARGET_COUNT - n_count)
+                msg = (
+                    f"Code: {codename}\n"
+                    f"Morning: {m_count} (left {remain_m})\n"
+                    f"Evening: {n_count} (left {remain_n})\n"
+                    f"ChatID: {user['chat_id']}\n"
+                    f"Color/Animal/Sport/Age: {user['color']}, {user['animal']}, {user['sport']}, {user['age']}"
+                )
+                await query.edit_message_text(msg)
+            else:
+                await query.edit_message_text(f"No user found with code {codename}.")
+
+        elif subprefix == "reset_change":
+            user = load_user_by_code(codename)
+            if not user:
+                await query.edit_message_text(f"No user found with code {codename}.")
+                return
+            kb = [
+                [InlineKeyboardButton("Reset counts", callback_data=f"adm_reset_{codename}")],
+                [InlineKeyboardButton("Change code", callback_data=f"adm_change_{codename}")]
+            ]
+            markup = InlineKeyboardMarkup(kb)
+            await query.edit_message_text(
+                f"User found: {codename}.\nDo you want to reset counts or change code?",
+                reply_markup=markup
             )
-            await query.edit_message_text(msg)
+
+        elif subprefix == "private":
+            user = load_user_by_code(codename)
+            if not user:
+                await query.edit_message_text(f"No user found with code {codename}.")
+                return
+            context.user_data["adm_private_chatid"] = user["chat_id"]
+            context.user_data["adm_private_msg"] = True
+            await query.edit_message_text(f"Please type the message you want to send to {codename}.")
+
         else:
-            await query.edit_message_text(f"No user found with code {codename}.")
-
-    elif prefix == "adm_reset_change":
-        user = load_user_by_code(codename)
-        if not user:
-            await query.edit_message_text(f"No user found with code {codename}.")
-            return
-        kb = [
-            [InlineKeyboardButton("Reset counts", callback_data=f"adm_reset_{codename}")],
-            [InlineKeyboardButton("Change code", callback_data=f"adm_change_{codename}")]
-        ]
-        markup = InlineKeyboardMarkup(kb)
-        await query.edit_message_text(
-            f"User found: {codename}.\nDo you want to reset counts or change code?",
-            reply_markup=markup
-        )
-
-    elif prefix == "adm_private":
-        user = load_user_by_code(codename)
-        if not user:
-            await query.edit_message_text(f"No user found with code {codename}.")
-            return
-        context.user_data["adm_private_chatid"] = user["chat_id"]
-        context.user_data["adm_private_msg"] = True
-        await query.edit_message_text(f"Please type the message you want to send to {codename}.")
-
+            keyboard = [[InlineKeyboardButton("Contact Admin", url="t.me/...")]]
+            markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                f"I received your button click but I don’t know how to handle subprefix '{subprefix}'.",
+                reply_markup=markup
+            )
     else:
         keyboard = [[InlineKeyboardButton("Contact Admin", url="t.me/...")]]
         markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            f"I received your button click but I don’t know how to handle it.\nPrefix: {prefix}",
+            f"I received your button click but prefix '{prefix}' is not recognized.",
             reply_markup=markup
         )
 
 #############################
 # Admin: "adm_reset_" or "adm_change_"
 #############################
-
 async def admin_reset_change_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -731,7 +814,7 @@ async def admin_reset_change_callback(update: Update, context: ContextTypes.DEFA
         )
         return
 
-    action = parts[1]
+    action = parts[1]   # "reset" or "change"
     codename = parts[2]
 
     if action == "reset":
@@ -847,6 +930,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user:
             await update.message.reply_text("You’re not registered. Please /start.")
             return
+        # If we wanted to do "simulate" again, we could. But let's just do a direct code update:
         update_user_code(chat_id, text)
         await update.message.reply_text(f"Your code is updated to {text}.")
         return
@@ -991,17 +1075,22 @@ def main():
     schedule_jobs(application)
 
     # Reminders
-    application.add_handler(CallbackQueryHandler(reminder_button_handler, pattern="^(morning_|evening_)"))
+    application.add_handler(CallbackQueryHandler(reminder_button_handler, pattern="^(morning_|evening_|contactadmin_)"))
     application.add_handler(CallbackQueryHandler(code_mismatch_handler, pattern="^(update_code|restart_diary)$"))
     application.add_handler(CallbackQueryHandler(done_button_handler, pattern="^done_entry$"))
 
     # Admin
     application.add_handler(CommandHandler("admin", admin_command))
-    application.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^(adm_check_progress|adm_find_code|adm_reset_change|adm_forgot|adm_broadcast|adm_private|adm_testall|adm_next_reminders)$"))
-    application.add_handler(CallbackQueryHandler(admin_code_inline_handler, pattern="^(adm_find_|adm_reset_change_|adm_private_)"))
+    application.add_handler(CallbackQueryHandler(admin_menu_handler, 
+        pattern="^(adm_check_progress|adm_find_code|adm_reset_change|adm_forgot|adm_broadcast|adm_private|adm_testall|adm_next_reminders)$"))
+    # Now 3-part split in admin_code_inline_handler
+    application.add_handler(CallbackQueryHandler(admin_code_inline_handler, 
+        pattern="^adm_"))  # We match 'adm_' then parse with split("_",2)
     application.add_handler(CallbackQueryHandler(admin_reset_change_callback, pattern="^(adm_reset_|adm_change_)"))
-    application.add_handler(CallbackQueryHandler(admin_broadcast_confirm_callback, pattern="^(adm_broadcast_confirm_yes|adm_broadcast_confirm_no)$"))
-    application.add_handler(CallbackQueryHandler(admin_private_confirm_callback, pattern="^(adm_private_confirm_yes|adm_private_confirm_no)$"))
+    application.add_handler(CallbackQueryHandler(admin_broadcast_confirm_callback, 
+        pattern="^(adm_broadcast_confirm_yes|adm_broadcast_confirm_no)$"))
+    application.add_handler(CallbackQueryHandler(admin_private_confirm_callback, 
+        pattern="^(adm_private_confirm_yes|adm_private_confirm_no)$"))
 
     # Single text handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))

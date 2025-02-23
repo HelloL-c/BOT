@@ -295,7 +295,7 @@ async def handle_start_buttons(update: Update, context: ContextTypes.DEFAULT_TYP
     elif choice == "change_code_start":
         simulate_unregistered_and_append50(chat_id)
         await query.edit_message_text(
-            "We’ve wiped your data and appended '50' to your codename.\n"
+            "We’ve wiped your data.\n"
             "Please type /start again to register as if new."
         )
 

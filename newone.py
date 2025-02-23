@@ -3,7 +3,11 @@ import os
 import psycopg2
 import pytz
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -16,12 +20,16 @@ from telegram.ext import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-# Logging setup
+#############################
+# Basic Configuration
+#############################
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = "8108051087:AAFt6oxps6oWQU92Ez30lE2yhS4BesuwEFY"
 MODERATOR_ID = 1068291865
+ADMIN_ID = 1068291865  # Replace with your actual admin chat ID
 POSTGRES_URL = os.environ.get("Postgres")
 
 # Use Singapore local time
@@ -30,7 +38,7 @@ SINGAPORE_TZ = pytz.timezone("Asia/Singapore")
 # Registration states
 REG_COLOR, REG_ANIMAL, REG_SPORT, REG_AGE = range(4)
 
-# We'll keep track of morning/evening automatically based on the reminder type
+# We track morning/evening automatically based on the reminder type
 TARGET_COUNT = 10  # need 10 morning + 10 night
 
 scheduler = AsyncIOScheduler()
@@ -40,7 +48,16 @@ MORNING_FORM = "https://forms.gle/cUen9unFbdQDPtTT9"
 EVENING_FORM = "https://forms.gle/wya3mQY9bPurEDU79"
 CONCLUDING_FORM = "https://forms.gle/VZHUrsYSJnvyWjfq9"
 
-# ------------------ Database Logic ------------------ #
+# For checking who forgot an entry after 1 hour
+last_reminder_counts = {
+    "morning": {},
+    "evening": {}
+}
+
+#############################
+# Database Logic
+#############################
+
 def get_connection():
     return psycopg2.connect(POSTGRES_URL, sslmode='require')
 
@@ -78,6 +95,7 @@ def load_user(chat_id):
     if row:
         color, animal, sport, age, code, m_count, n_count = row
         return {
+            "chat_id": chat_id,
             "color": color,
             "animal": animal,
             "sport": sport,
@@ -88,10 +106,55 @@ def load_user(chat_id):
         }
     return None
 
+def load_user_by_code(codename):
+    conn = get_connection()
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT chat_id, color, animal, sport, age, code, morning_count, night_count
+            FROM user_codes
+            WHERE code=%s
+        """, (codename,))
+        row = cur.fetchone()
+    conn.close()
+    if row:
+        chat_id, color, animal, sport, age, code, m_count, n_count = row
+        return {
+            "chat_id": chat_id,
+            "color": color,
+            "animal": animal,
+            "sport": sport,
+            "age": age,
+            "code": code,
+            "morning_count": m_count,
+            "night_count": n_count
+        }
+    return None
+
+def get_all_users():
+    conn = get_connection()
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT chat_id, color, animal, sport, age, code, morning_count, night_count
+            FROM user_codes
+        """)
+        rows = cur.fetchall()
+    conn.close()
+    users = []
+    for row in rows:
+        chat_id, color, animal, sport, age, code, m_count, n_count = row
+        users.append({
+            "chat_id": chat_id,
+            "color": color,
+            "animal": animal,
+            "sport": sport,
+            "age": age,
+            "code": code,
+            "morning_count": m_count,
+            "night_count": n_count
+        })
+    return users
+
 def save_user(chat_id, color, animal, sport, age, code, morning_count=0, night_count=0):
-    """
-    Insert or update a user row.
-    """
     conn = get_connection()
     with conn.cursor() as cur:
         cur.execute("""
@@ -113,7 +176,6 @@ def reset_user(chat_id):
     """
     Overwrite the user's row to reset them for a brand-new diary study.
     This sets morning_count=0, night_count=0 but keeps the same color, animal, etc.
-    Alternatively, you could remove the row entirely.
     """
     user = load_user(chat_id)
     if not user:
@@ -125,9 +187,23 @@ def reset_user(chat_id):
         user["sport"],
         user["age"],
         user["code"],
-        0,  # reset morning
-        0   # reset night
+        0,
+        0
     )
+
+def update_user_code(chat_id, new_code):
+    user = load_user(chat_id)
+    if user:
+        save_user(
+            chat_id,
+            user["color"],
+            user["animal"],
+            user["sport"],
+            user["age"],
+            new_code,
+            user["morning_count"],
+            user["night_count"]
+        )
 
 def update_counts(chat_id, is_morning):
     """
@@ -159,18 +235,17 @@ def update_counts(chat_id, is_morning):
     is_done = (m_count >= TARGET_COUNT and n_count >= TARGET_COUNT)
     return (m_count, n_count, is_done)
 
-# ------------------ Registration Flow ------------------ #
+#############################
+# Registration Flow
+#############################
+
+REG_COLOR, REG_ANIMAL, REG_SPORT, REG_AGE = range(4)
+
 async def start_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    If user is in DB, show inline buttons:
-    "Continue Diary Study" or "Restart Diary Study"
-    If user is not in DB, begin asking color, animal, etc.
-    """
     chat_id = str(update.effective_chat.id)
     user_data = load_user(chat_id)
     if user_data:
         code = user_data["code"]
-        # show inline buttons
         keyboard = [
             [InlineKeyboardButton("Continue Diary Study", callback_data="cont_diary")],
             [InlineKeyboardButton("Restart Diary Study",  callback_data="restart_diary")]
@@ -189,14 +264,9 @@ async def start_registration(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return REG_COLOR
 
 async def handle_start_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Callback for the inline buttons: cont_diary or restart_diary
-    If cont_diary -> do nothing
-    If restart_diary -> reset counts
-    """
     query = update.callback_query
     await query.answer()
-    choice = query.data  # "cont_diary" or "restart_diary"
+    choice = query.data
     chat_id = str(query.message.chat_id)
 
     if choice == "cont_diary":
@@ -204,7 +274,6 @@ async def handle_start_buttons(update: Update, context: ContextTypes.DEFAULT_TYP
             "Great! You can wait for the next reminder or type /done if you have an ongoing entry."
         )
     else:
-        # "restart_diary"
         reset_user(chat_id)
         await query.edit_message_text(
             "Your diary study has been restarted! All your morning/night counts are now 0.\n"
@@ -249,7 +318,6 @@ async def reg_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
     animal = context.user_data["animal"]
     sport = context.user_data["sport"]
     code = f"{color[0].upper()}{animal[0].upper()}{sport[0].upper()}{age_str}"
-    # Initialize morning/night counts to 0
     save_user(chat_id, color, animal, sport, age_str, code, 0, 0)
 
     await update.message.reply_text(
@@ -262,18 +330,29 @@ async def reg_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Registration canceled. Have a nice day!")
     return ConversationHandler.END
 
-# ------------------ Reminders ------------------ #
+#############################
+# Reminders & 1-Hour Tracking
+#############################
+
+def store_current_counts(period):
+    """Store the current morning/night counts for each user so we can check who forgot."""
+    all_users = get_all_users()
+    if period == "morning":
+        last_reminder_counts["morning"] = {}
+        for u in all_users:
+            last_reminder_counts["morning"][u["chat_id"]] = u["morning_count"]
+    else:
+        last_reminder_counts["evening"] = {}
+        for u in all_users:
+            last_reminder_counts["evening"][u["chat_id"]] = u["night_count"]
+
 async def morning_reminder(context: ContextTypes.DEFAULT_TYPE):
     """At 8:00 AM local time. Sends an inline button to let user complete morning entry."""
     try:
-        conn = get_connection()
-        with conn.cursor() as cur:
-            cur.execute("SELECT chat_id, code FROM user_codes")
-            rows = cur.fetchall()
-        conn.close()
-
-        for (chat_id, code) in rows:
-            # Inline button to "Complete Morning Entry"
+        all_users = get_all_users()
+        for u in all_users:
+            chat_id = u["chat_id"]
+            code = u["code"]
             keyboard = [
                 [InlineKeyboardButton("Complete Morning Entry", callback_data=f"morning_{code}")]
             ]
@@ -287,6 +366,8 @@ async def morning_reminder(context: ContextTypes.DEFAULT_TYPE):
                 ),
                 reply_markup=markup
             )
+        # Store current morning counts
+        store_current_counts("morning")
     except Exception as e:
         logger.error(f"Error in morning reminder: {e}")
         await context.bot.send_message(chat_id=MODERATOR_ID, text=f"Error in morning reminder: {e}")
@@ -294,13 +375,10 @@ async def morning_reminder(context: ContextTypes.DEFAULT_TYPE):
 async def evening_reminder(context: ContextTypes.DEFAULT_TYPE):
     """At 6:00 PM local time. Sends an inline button for evening entry."""
     try:
-        conn = get_connection()
-        with conn.cursor() as cur:
-            cur.execute("SELECT chat_id, code FROM user_codes")
-            rows = cur.fetchall()
-        conn.close()
-
-        for (chat_id, code) in rows:
+        all_users = get_all_users()
+        for u in all_users:
+            chat_id = u["chat_id"]
+            code = u["code"]
             keyboard = [
                 [InlineKeyboardButton("Complete Evening Entry", callback_data=f"evening_{code}")]
             ]
@@ -314,6 +392,7 @@ async def evening_reminder(context: ContextTypes.DEFAULT_TYPE):
                 ),
                 reply_markup=markup
             )
+        store_current_counts("evening")
     except Exception as e:
         logger.error(f"Error in evening reminder: {e}")
         await context.bot.send_message(chat_id=MODERATOR_ID, text=f"Error in evening reminder: {e}")
@@ -321,7 +400,7 @@ async def evening_reminder(context: ContextTypes.DEFAULT_TYPE):
 def schedule_jobs(application):
     if not scheduler.running:
         scheduler.start()
-    # 8:00 AM local (SG time)
+    # 8:00 AM local
     scheduler.add_job(
         morning_reminder,
         CronTrigger(hour=8, minute=0, timezone=SINGAPORE_TZ),
@@ -329,7 +408,7 @@ def schedule_jobs(application):
         id="morning_reminder",
         replace_existing=True
     )
-    # 6:00 PM local (SG time)
+    # 6:00 PM local
     scheduler.add_job(
         evening_reminder,
         CronTrigger(hour=18, minute=0, timezone=SINGAPORE_TZ),
@@ -338,14 +417,11 @@ def schedule_jobs(application):
         replace_existing=True
     )
 
-# -------------- Handling the Inline Button after Reminder -------------- #
+#############################
+# Handling the Reminder Buttons
+#############################
+
 async def reminder_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Called when user clicks "Complete Morning Entry" or "Complete Evening Entry".
-    callback_data is "morning_CODE" or "evening_CODE".
-    We check if code matches. If not, ask them to update or restart. 
-    If yes, send form link + 'Done' button.
-    """
     query = update.callback_query
     await query.answer()
     data = query.data  # e.g. "morning_BCR24" or "evening_BGR20"
@@ -363,7 +439,6 @@ async def reminder_button_handler(update: Update, context: ContextTypes.DEFAULT_
 
     # Compare user_code with user["code"]
     if user_code != user["code"]:
-        # Different code => inline buttons to update code or restart
         keyboard = [
             [InlineKeyboardButton("Update Code", callback_data="update_code")],
             [InlineKeyboardButton("Restart Diary", callback_data="restart_diary")]
@@ -376,7 +451,6 @@ async def reminder_button_handler(update: Update, context: ContextTypes.DEFAULT_
         )
         return
     else:
-        # Code matches => send the form link + a "Done" button
         if entry_type == "morning":
             form_link = MORNING_FORM
             friendly_text = "morning"
@@ -384,9 +458,7 @@ async def reminder_button_handler(update: Update, context: ContextTypes.DEFAULT_
             form_link = EVENING_FORM
             friendly_text = "evening"
 
-        # We'll store the entry_type in user_data so we know which count to increment on /done
         context.user_data["entry_type"] = entry_type
-
         keyboard = [[InlineKeyboardButton("I’m Done!", callback_data="done_entry")]]
         markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
@@ -398,9 +470,6 @@ async def reminder_button_handler(update: Update, context: ContextTypes.DEFAULT_
         )
 
 async def code_mismatch_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Callback for 'update_code' or 'restart_diary' after code mismatch.
-    """
     query = update.callback_query
     await query.answer()
     choice = query.data  # "update_code" or "restart_diary"
@@ -412,10 +481,8 @@ async def code_mismatch_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     if choice == "update_code":
         await query.edit_message_text("Please type your new code in the chat.")
-        # We can store a state or handle it with a simple approach. Let's store a state in context.
         context.user_data["awaiting_new_code"] = True
     else:
-        # "restart_diary"
         reset_user(chat_id)
         await query.edit_message_text(
             "Your diary study has been restarted!\n"
@@ -424,12 +491,8 @@ async def code_mismatch_handler(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
 async def handle_new_code_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    If context.user_data["awaiting_new_code"] is True, we set the new code in DB.
-    Then ask user to re-click the reminder or wait for next reminder.
-    """
     if not context.user_data.get("awaiting_new_code", False):
-        return  # Not waiting for a code update, ignore
+        return  # Not waiting for a code update
 
     new_code = update.message.text.strip()
     chat_id = str(update.effective_chat.id)
@@ -439,7 +502,7 @@ async def handle_new_code_message(update: Update, context: ContextTypes.DEFAULT_
         context.user_data["awaiting_new_code"] = False
         return
 
-    # Keep existing color, animal, etc., just update code
+    # Keep existing color, etc., just update code
     save_user(
         chat_id,
         user["color"],
@@ -457,9 +520,6 @@ async def handle_new_code_message(update: Update, context: ContextTypes.DEFAULT_
     context.user_data["awaiting_new_code"] = False
 
 async def done_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    If user clicks "I’m Done!" inline button => increment morning/night count
-    """
     query = update.callback_query
     await query.answer()
     chat_id = str(query.message.chat_id)
@@ -475,7 +535,6 @@ async def done_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     is_morning = (entry_type == "morning")
     m_count, n_count, is_done = update_counts(chat_id, is_morning)
-
     if is_done:
         await query.edit_message_text(
             text=(
@@ -499,6 +558,314 @@ async def done_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         )
 
+#############################
+# Admin-Only Functionality
+#############################
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /admin command. Only admin_id can use. """
+    if update.effective_chat.id != ADMIN_ID:
+        await update.message.reply_text("Sorry, you’re not authorized.")
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("Check user progress", callback_data="adm_check_progress")],
+        [InlineKeyboardButton("Find user by codename", callback_data="adm_find_code")],
+        [InlineKeyboardButton("Reset/Change codename", callback_data="adm_reset_change")],
+        [InlineKeyboardButton("Who forgot entry (1h past)?", callback_data="adm_forgot")],
+        [InlineKeyboardButton("Broadcast Message", callback_data="adm_broadcast")],
+        [InlineKeyboardButton("Private Message a Participant", callback_data="adm_private")],
+        [InlineKeyboardButton("Test All Bot Functions", callback_data="adm_testall")],
+        [InlineKeyboardButton("Check Next Reminders", callback_data="adm_next_reminders")]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Hello Admin! What do you need?", reply_markup=markup)
+
+async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.message.chat_id != ADMIN_ID:
+        await query.edit_message_text("Not authorized.")
+        return
+
+    choice = query.data
+    if choice == "adm_check_progress":
+        users = get_all_users()
+        if not users:
+            await query.edit_message_text("No users found.")
+            return
+        lines = []
+        for u in users:
+            remain_m = max(0, TARGET_COUNT - u["morning_count"])
+            remain_n = max(0, TARGET_COUNT - u["night_count"])
+            lines.append(
+                f"Code: {u['code']}, M:{u['morning_count']}/{TARGET_COUNT} "
+                f"(left {remain_m}), E:{u['night_count']}/{TARGET_COUNT} "
+                f"(left {remain_n})"
+            )
+        await query.edit_message_text("\n".join(lines) or "No data.")
+
+    elif choice == "adm_find_code":
+        await query.edit_message_text("Please type the codename to find.")
+        context.user_data["adm_find_code"] = True
+
+    elif choice == "adm_reset_change":
+        await query.edit_message_text("Please type the codename you want to reset or change.")
+        context.user_data["adm_reset_change"] = True
+
+    elif choice == "adm_forgot":
+        text = check_forgot_entries()
+        await query.edit_message_text(text or "No missing entries found.")
+
+    elif choice == "adm_broadcast":
+        await query.edit_message_text("Please type the message to broadcast to all participants.")
+        context.user_data["adm_broadcast"] = True
+
+    elif choice == "adm_private":
+        await query.edit_message_text("Please type the codename of the participant you want to message.")
+        context.user_data["adm_private_code"] = True
+
+    elif choice == "adm_testall":
+        await query.edit_message_text("Sending test morning & evening reminders to admin only...")
+        # We'll do simple test functions
+        await test_morning_reminder_for_admin(context)
+        await test_evening_reminder_for_admin(context)
+        await query.message.reply_text("Test complete! These test reminders were NOT sent to participants.")
+
+    elif choice == "adm_next_reminders":
+        text = get_next_reminders_info()
+        await query.edit_message_text(text)
+
+async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle text input after admin chose broadcast, private message, find code, etc."""
+    if update.effective_chat.id != ADMIN_ID:
+        return
+
+    text = update.message.text.strip()
+
+    # Broadcasting
+    if context.user_data.get("adm_broadcast"):
+        context.user_data["adm_broadcast"] = False
+        await broadcast_to_all(text, context)
+        await update.message.reply_text("Broadcast sent to all participants.")
+        return
+
+    # Private message step 1: user typed codename
+    if context.user_data.get("adm_private_code"):
+        context.user_data["adm_private_code"] = False
+        user = load_user_by_code(text)
+        if not user:
+            await update.message.reply_text(f"No participant found with codename {text}.")
+            return
+        context.user_data["adm_private_chatid"] = user["chat_id"]
+        context.user_data["adm_private_msg"] = True
+        await update.message.reply_text(
+            f"Participant found: {text}. Now type the message you want to send them."
+        )
+        return
+
+    # Private message step 2: user typed the message for participant
+    if context.user_data.get("adm_private_msg"):
+        context.user_data["adm_private_msg"] = False
+        p_chatid = context.user_data.get("adm_private_chatid")
+        if not p_chatid:
+            await update.message.reply_text("No participant chat ID stored. Please try again.")
+            return
+        await private_message_user(p_chatid, text, context)
+        await update.message.reply_text("Message sent to participant.")
+        return
+
+    # Find code
+    if context.user_data.get("adm_find_code"):
+        context.user_data["adm_find_code"] = False
+        user = load_user_by_code(text)
+        if user:
+            remain_m = max(0, TARGET_COUNT - user["morning_count"])
+            remain_n = max(0, TARGET_COUNT - user["night_count"])
+            msg = (
+                f"Found user with code {text}.\n"
+                f"Morning: {user['morning_count']} (left {remain_m}), "
+                f"Evening: {user['night_count']} (left {remain_n})\n"
+                f"Chat ID: {user['chat_id']}\n"
+                f"Color/Animal/Sport/Age: {user['color']}, {user['animal']}, "
+                f"{user['sport']}, {user['age']}"
+            )
+        else:
+            msg = f"No user found with code {text}."
+        await update.message.reply_text(msg)
+        return
+
+    # Reset/Change code
+    if context.user_data.get("adm_reset_change"):
+        context.user_data["adm_reset_change"] = False
+        user = load_user_by_code(text)
+        if not user:
+            await update.message.reply_text(f"No user found with code {text}.")
+            return
+        keyboard = [
+            [InlineKeyboardButton("Reset counts", callback_data=f"adm_reset_{text}")],
+            [InlineKeyboardButton("Change code", callback_data=f"adm_change_{text}")]
+        ]
+        markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"User found: {text}. Do you want to reset counts or change code?",
+            reply_markup=markup
+        )
+        return
+
+########################
+# Admin Helper Functions
+########################
+
+async def broadcast_to_all(message: str, context: ContextTypes.DEFAULT_TYPE):
+    """Sends 'message' to all participants in user_codes."""
+    users = get_all_users()
+    for u in users:
+        try:
+            await context.bot.send_message(chat_id=int(u["chat_id"]), text=message)
+        except Exception as e:
+            logger.error(f"Failed to broadcast to {u['chat_id']}: {e}")
+
+async def private_message_user(chat_id: str, message: str, context: ContextTypes.DEFAULT_TYPE):
+    """Send 'message' to a single participant with chat_id."""
+    try:
+        await context.bot.send_message(chat_id=int(chat_id), text=message)
+    except Exception as e:
+        logger.error(f"Failed to private-message {chat_id}: {e}")
+
+def check_forgot_entries():
+    """Compare last_reminder_counts with current DB to see who hasn't incremented since last reminder."""
+    missing = []
+    all_users = get_all_users()
+    # morning
+    old_morning = last_reminder_counts.get("morning", {})
+    for u in all_users:
+        if u["chat_id"] in old_morning:
+            old_val = old_morning[u["chat_id"]]
+            if u["morning_count"] == old_val:
+                missing.append(f"{u['code']} forgot morning entry")
+
+    # evening
+    old_evening = last_reminder_counts.get("evening", {})
+    for u in all_users:
+        if u["chat_id"] in old_evening:
+            old_val = old_evening[u["chat_id"]]
+            if u["night_count"] == old_val:
+                missing.append(f"{u['code']} forgot evening entry")
+
+    return "\n".join(missing)
+
+########################
+# Admin: Reset or Change
+########################
+
+async def admin_reset_change_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Callback for "adm_reset_CODE" or "adm_change_CODE"
+    """
+    query = update.callback_query
+    await query.answer()
+    data = query.data  # e.g. "adm_reset_BCR24" or "adm_change_BGR20"
+    parts = data.split("_")
+    if len(parts) != 3:
+        await query.edit_message_text("Invalid data.")
+        return
+
+    # parts -> ["adm", "reset", "BCR24"] or ["adm", "change", "BCR24"]
+    action = parts[1]  # "reset" or "change"
+    code   = parts[2]
+
+    if action == "reset":
+        user = load_user_by_code(code)
+        if not user:
+            await query.edit_message_text("User not found.")
+            return
+        reset_user(user["chat_id"])
+        await query.edit_message_text(f"User with code {code} has been reset to 0 morning/evening counts.")
+    elif action == "change":
+        user = load_user_by_code(code)
+        if not user:
+            await query.edit_message_text("User not found.")
+            return
+        context.user_data["adm_change_user"] = user["chat_id"]
+        await query.edit_message_text("Please type the new code you want to assign.")
+        context.user_data["adm_changing_code"] = True
+
+async def admin_change_code_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("adm_changing_code"):
+        return
+    new_code = update.message.text.strip()
+    chat_id = context.user_data["adm_change_user"]
+    user = load_user(chat_id)
+    if not user:
+        await update.message.reply_text("User not found or no longer exists.")
+        context.user_data["adm_changing_code"] = False
+        return
+    update_user_code(chat_id, new_code)
+    await update.message.reply_text(f"User code updated to {new_code}.")
+    context.user_data["adm_changing_code"] = False
+
+########################
+# Admin: Test Reminders
+########################
+
+async def test_morning_reminder_for_admin(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text="Test Morning Reminder: (This is a test, not sent to participants.)"
+        )
+    except Exception as e:
+        logger.error(f"Error sending test morning reminder to admin: {e}")
+
+async def test_evening_reminder_for_admin(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text="Test Evening Reminder: (This is a test, not sent to participants.)"
+        )
+    except Exception as e:
+        logger.error(f"Error sending test evening reminder to admin: {e}")
+
+########################
+# Admin: Next Reminders
+########################
+
+def get_next_reminders_info():
+    morning_job = scheduler.get_job("morning_reminder")
+    evening_job = scheduler.get_job("evening_reminder")
+    if not morning_job or not evening_job:
+        return "No scheduled jobs found for morning or evening reminder."
+
+    now = datetime.now(tz=SINGAPORE_TZ)
+    next_morning = morning_job.next_run_time
+    next_evening = evening_job.next_run_time
+
+    delta_m = (next_morning - now).total_seconds()
+    delta_e = (next_evening - now).total_seconds()
+
+    if delta_m < 0:
+        text_m = "Morning reminder is due very soon or just triggered!"
+    else:
+        hrs_m, rem_m = divmod(delta_m, 3600)
+        mins_m, _ = divmod(rem_m, 60)
+        text_m = (f"Next Morning Reminder in {int(hrs_m)} hour(s) and {int(mins_m)} minute(s). "
+                  f"({next_morning.astimezone(SINGAPORE_TZ).strftime('%Y-%m-%d %H:%M %Z')})")
+
+    if delta_e < 0:
+        text_e = "Evening reminder is due very soon or just triggered!"
+    else:
+        hrs_e, rem_e = divmod(delta_e, 3600)
+        mins_e, _ = divmod(rem_e, 60)
+        text_e = (f"Next Evening Reminder in {int(hrs_e)} hour(s) and {int(mins_e)} minute(s). "
+                  f"({next_evening.astimezone(SINGAPORE_TZ).strftime('%Y-%m-%d %H:%M %Z')})")
+
+    return text_m + "\n" + text_e
+
+########################
+# Main
+########################
+
 def main():
     init_db()
     application = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -519,23 +886,8 @@ def main():
     # Inline callback for continuing or restarting the diary
     application.add_handler(CallbackQueryHandler(handle_start_buttons, pattern="^(cont_diary|restart_diary)$"))
 
-    # Schedule jobs
-    if not scheduler.running:
-        scheduler.start()
-    scheduler.add_job(
-        morning_reminder,
-        CronTrigger(hour=8, minute=0, timezone=SINGAPORE_TZ),
-        args=[application],
-        id="morning_reminder",
-        replace_existing=True
-    )
-    scheduler.add_job(
-        evening_reminder,
-        CronTrigger(hour=18, minute=0, timezone=SINGAPORE_TZ),
-        args=[application],
-        id="evening_reminder",
-        replace_existing=True
-    )
+    # Schedule reminders
+    schedule_jobs(application)
 
     # Callback for "Complete Morning Entry" or "Complete Evening Entry"
     application.add_handler(CallbackQueryHandler(reminder_button_handler, pattern="^(morning_|evening_)"))
@@ -548,6 +900,17 @@ def main():
 
     # Inline "I’m Done!" => increment count
     application.add_handler(CallbackQueryHandler(done_button_handler, pattern="^done_entry$"))
+
+    # ----------------
+    # Admin Handlers
+    # ----------------
+    application.add_handler(CommandHandler("admin", admin_command))
+    application.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^(adm_check_progress|adm_find_code|adm_reset_change|adm_forgot|adm_broadcast|adm_private|adm_testall|adm_next_reminders)$"))
+    # This handles text after admin has chosen broadcast, private message, etc.
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler))
+    # Handling reset/change code callbacks
+    application.add_handler(CallbackQueryHandler(admin_reset_change_callback, pattern="^(adm_reset_|adm_change_)"))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_change_code_text))
 
     application.run_polling()
 

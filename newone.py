@@ -162,8 +162,8 @@ async def send_evening_reminder(context):
 def schedule_jobs(application):
     if not scheduler.running:
         scheduler.start()
-    scheduler.add_job(send_morning_reminder, CronTrigger(hour=8, minute=0), args=[application], id="morning_reminder", replace_existing=True)
-    scheduler.add_job(send_evening_reminder, CronTrigger(hour=20, minute=0), args=[application], id="evening_reminder", replace_existing=True)
+    scheduler.add_job(send_morning_reminder, CronTrigger(hour=12, minute=0), args=[application], id="morning_reminder", replace_existing=True)
+    scheduler.add_job(send_evening_reminder, CronTrigger(hour=10, minute=0), args=[application], id="evening_reminder", replace_existing=True)
 
 def main():
     init_db()  # Create table if not exists

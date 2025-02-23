@@ -499,33 +499,6 @@ async def code_mismatch_handler(update: Update, context: ContextTypes.DEFAULT_TY
             "Use /start if you want to update your color/animal/sport/age."
         )
 
-async def handle_new_code_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("awaiting_new_code", False):
-        return
-    new_code = update.message.text.strip()
-    chat_id = str(update.effective_chat.id)
-    user = load_user(chat_id)
-    if not user:
-        await update.message.reply_text("You’re not registered. Please /start.")
-        context.user_data["awaiting_new_code"] = False
-        return
-
-    save_user(
-        chat_id,
-        user["color"],
-        user["animal"],
-        user["sport"],
-        user["age"],
-        new_code,
-        user["morning_count"],
-        user["night_count"]
-    )
-    await update.message.reply_text(
-        f"Your code is updated to {new_code}.\n"
-        "Please wait for the next reminder or press the inline button if it was already sent."
-    )
-    context.user_data["awaiting_new_code"] = False
-
 async def done_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -604,6 +577,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         text = check_forgot_entries()
         await query.edit_message_text(text or "No missing entries found.")
     elif choice == "adm_broadcast":
+        # Admin will type the broadcast text => store flag
         await query.edit_message_text("Please type the message to broadcast to all participants.")
         context.user_data["adm_broadcast"] = True
     elif choice == "adm_private":
@@ -691,11 +665,9 @@ async def admin_code_inline_handler(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     await query.answer()
     data = query.data
-    # data might be "adm_find_BCR25", "adm_reset_change_BCR25", "adm_private_BCR25"
     prefix, codename = data.split("_", 1)  # e.g. prefix="adm_find", codename="BCR25"
 
     if prefix == "adm_find":
-        # Show user info
         user = load_user_by_code(codename)
         if user:
             m_count = user["morning_count"] or 0
@@ -713,12 +685,7 @@ async def admin_code_inline_handler(update: Update, context: ContextTypes.DEFAUL
         else:
             await query.edit_message_text(f"No user found with code {codename}.")
 
-    elif prefix == "adm_reset":
-        # Actually we might do "adm_reset_change_BCR25"? 
-        # but let's do a simpler approach. We'll handle subcases below
-        pass
     elif prefix == "adm_reset_change":
-        # Show sub-menu
         user = load_user_by_code(codename)
         if not user:
             await query.edit_message_text(f"No user found with code {codename}.")
@@ -751,7 +718,6 @@ async def admin_reset_change_callback(update: Update, context: ContextTypes.DEFA
     await query.answer()
     data = query.data  # e.g. "adm_reset_BCR24" or "adm_change_BCR24"
     parts = data.split("_", 2)
-    # => ["adm", "reset", "BCR24"] or ["adm", "change", "BCR24"]
     if len(parts) != 3:
         await query.edit_message_text("Invalid data.")
         return
@@ -835,9 +801,6 @@ def check_forgot_entries():
 #############################
 
 async def test_morning_reminder_for_admin(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Send the exact same style as the real morning reminder, but only to ADMIN.
-    """
     code = "TEST"
     keyboard = [
         [InlineKeyboardButton("Complete Morning Entry", callback_data=f"morning_{code}")]
@@ -905,6 +868,145 @@ def get_next_reminders_info():
     return text_m + "\n" + text_e
 
 #############################
+# Single Text Handler
+#############################
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles all typed text from both admin and participants.
+    - Admin: broadcast or private message flow
+    - Participant: new code mismatch
+    - Admin: changing code
+    """
+    chat_id = update.effective_chat.id
+    text = update.message.text.strip()
+
+    # 1) If admin is typing broadcast or private messages
+    if chat_id == ADMIN_ID:
+        # a) Broadcasting
+        if context.user_data.get("adm_broadcast"):
+            context.user_data["adm_broadcast"] = False
+            context.user_data["adm_broadcast_text"] = text
+            # Ask for confirmation
+            keyboard = [
+                [
+                    InlineKeyboardButton("Yes", callback_data="adm_broadcast_confirm_yes"),
+                    InlineKeyboardButton("No", callback_data="adm_broadcast_confirm_no")
+                ]
+            ]
+            markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                f"Are you sure you want to broadcast this message?\n\n{text}",
+                reply_markup=markup
+            )
+            return
+
+        # b) Private message
+        if context.user_data.get("adm_private_msg"):
+            context.user_data["adm_private_msg"] = False
+            context.user_data["adm_private_text"] = text
+            # Ask for confirmation
+            keyboard = [
+                [
+                    InlineKeyboardButton("Yes", callback_data="adm_private_confirm_yes"),
+                    InlineKeyboardButton("No", callback_data="adm_private_confirm_no")
+                ]
+            ]
+            markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                f"Are you sure you want to send this message?\n\n{text}",
+                reply_markup=markup
+            )
+            return
+
+        # c) Changing code for user
+        if context.user_data.get("adm_changing_code"):
+            new_code = text
+            user_chatid = context.user_data["adm_change_user"]
+            user = load_user(user_chatid)
+            if not user:
+                await update.message.reply_text("User not found or no longer exists.")
+                context.user_data["adm_changing_code"] = False
+                return
+            update_user_code(user_chatid, new_code)
+            await update.message.reply_text(f"User code updated to {new_code}.")
+            context.user_data["adm_changing_code"] = False
+            return
+
+    # 2) If participant typed new code mismatch
+    if context.user_data.get("awaiting_new_code"):
+        new_code = text
+        user = load_user(chat_id)
+        if not user:
+            await update.message.reply_text("You’re not registered. Please /start.")
+            context.user_data["awaiting_new_code"] = False
+            return
+        save_user(
+            chat_id,
+            user["color"],
+            user["animal"],
+            user["sport"],
+            user["age"],
+            new_code,
+            user["morning_count"],
+            user["night_count"]
+        )
+        await update.message.reply_text(
+            f"Your code is updated to {new_code}.\n"
+            "Please wait for the next reminder or press the inline button if it was already sent."
+        )
+        context.user_data["awaiting_new_code"] = False
+        return
+
+    # If we reach here, there's no recognized state
+    await update.message.reply_text("No recognized state for this text. Please use /admin or /start if needed.")
+
+#############################
+# Admin Confirmation Callbacks
+#############################
+
+async def admin_broadcast_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles Yes/No for broadcast confirmation."""
+    query = update.callback_query
+    await query.answer()
+    choice = query.data  # "adm_broadcast_confirm_yes" or "adm_broadcast_confirm_no"
+
+    if choice == "adm_broadcast_confirm_yes":
+        text = context.user_data.get("adm_broadcast_text", "")
+        if text:
+            await broadcast_to_all(text, context)
+            await query.edit_message_text("Broadcast sent to all participants.")
+        else:
+            await query.edit_message_text("No broadcast text found. Nothing sent.")
+        context.user_data["adm_broadcast_text"] = ""
+    else:
+        # "adm_broadcast_confirm_no"
+        await query.edit_message_text("Broadcast canceled.")
+        context.user_data["adm_broadcast_text"] = ""
+
+async def admin_private_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles Yes/No for private message confirmation."""
+    query = update.callback_query
+    await query.answer()
+    choice = query.data  # "adm_private_confirm_yes" or "adm_private_confirm_no"
+
+    if choice == "adm_private_confirm_yes":
+        p_chatid = context.user_data.get("adm_private_chatid", None)
+        msg = context.user_data.get("adm_private_text", "")
+        if p_chatid and msg:
+            await private_message_user(p_chatid, msg, context)
+            await query.edit_message_text("Private message sent to participant.")
+        else:
+            await query.edit_message_text("No message or participant found. Nothing sent.")
+        context.user_data["adm_private_chatid"] = None
+        context.user_data["adm_private_text"] = ""
+    else:
+        # "adm_private_confirm_no"
+        await query.edit_message_text("Private message canceled.")
+        context.user_data["adm_private_chatid"] = None
+        context.user_data["adm_private_text"] = ""
+
+#############################
 # Putting It All Together
 #############################
 
@@ -937,22 +1039,25 @@ def main():
     # Real morning/evening inline flows
     application.add_handler(CallbackQueryHandler(reminder_button_handler, pattern="^(morning_|evening_)"))
     application.add_handler(CallbackQueryHandler(code_mismatch_handler, pattern="^(update_code|restart_diary)$"))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_new_code_message))
+    # *** We remove separate handle_new_code_message *** 
+    # Instead, we do everything in text_handler below
+
     application.add_handler(CallbackQueryHandler(done_button_handler, pattern="^done_entry$"))
 
     # Admin
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CallbackQueryHandler(admin_menu_handler, pattern="^(adm_check_progress|adm_find_code|adm_reset_change|adm_forgot|adm_broadcast|adm_private|adm_testall|adm_next_reminders)$"))
 
-    # For typed text after admin has chosen broadcast, private message, find code, etc.
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler))
-
-    # Handling reset/change code callbacks
-    application.add_handler(CallbackQueryHandler(admin_reset_change_callback, pattern="^(adm_reset_|adm_change_)"))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_change_code_text))
-
-    # If you want inline code listing for find/reset, define a pattern like "adm_find_|adm_reset_change_|adm_private_"
+    # Inline code listing for find/reset/private
     application.add_handler(CallbackQueryHandler(admin_code_inline_handler, pattern="^(adm_find_|adm_reset_change_|adm_private_)"))
+    application.add_handler(CallbackQueryHandler(admin_reset_change_callback, pattern="^(adm_reset_|adm_change_)"))
+
+    # Add the admin confirmation callbacks for broadcast/private
+    application.add_handler(CallbackQueryHandler(admin_broadcast_confirm_callback, pattern="^(adm_broadcast_confirm_yes|adm_broadcast_confirm_no)$"))
+    application.add_handler(CallbackQueryHandler(admin_private_confirm_callback, pattern="^(adm_private_confirm_yes|adm_private_confirm_no)$"))
+
+    # *** Single text handler for all typed text (both admin and participant) ***
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     application.run_polling()
 

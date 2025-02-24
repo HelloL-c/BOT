@@ -994,6 +994,24 @@ def get_next_reminders_info():
 
     return text_m + "\n" + text_e
 
+async def admin_broadcast_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    choice = query.data
+    if choice == "adm_broadcast_confirm_yes":
+        text = context.user_data.get("adm_broadcast_text", "")
+        if text:
+            await broadcast_to_all(text, context)
+            await query.edit_message_text("Broadcast sent to all participants.")
+        else:
+            await query.edit_message_text("No broadcast text found. Nothing sent.")
+        context.user_data["adm_broadcast_text"] = ""
+    else:
+        # "adm_broadcast_confirm_no"
+        await query.edit_message_text("Broadcast canceled.")
+        context.user_data["adm_broadcast_text"] = ""
+
+
 #############################
 # Main
 #############################

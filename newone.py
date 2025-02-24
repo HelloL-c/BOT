@@ -669,7 +669,7 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif choice == "adm_find_code":
         await show_inline_all_codes(query, prefix="adm_find_")
     elif choice == "adm_reset_change":
-        await show_inline_all_codes(query, prefix="adm_reset_change_")
+        await show_inline_all_codes(query, prefix="adm_resetchange_")
     elif choice == "adm_forgot":
         text = check_forgot_entries()
         await query.edit_message_text(text or "No missing entries found.")
@@ -794,7 +794,7 @@ async def admin_code_inline_handler(update: Update, context: ContextTypes.DEFAUL
             else:
                 await query.edit_message_text(f"No user found with code {codename}.")
 
-        elif subprefix == "reset_change":
+        elif subprefix == "resetchange":
             user = load_user_by_code(codename)
             if not user:
                 await query.edit_message_text(f"No user found with code {codename}.")

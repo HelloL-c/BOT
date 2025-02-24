@@ -1011,6 +1011,28 @@ async def admin_broadcast_confirm_callback(update: Update, context: ContextTypes
         await query.edit_message_text("Broadcast canceled.")
         context.user_data["adm_broadcast_text"] = ""
 
+async def admin_private_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Called when admin chooses Yes/No to confirm a private message to a participant."""
+    query = update.callback_query
+    await query.answer()
+    choice = query.data
+    if choice == "adm_private_confirm_yes":
+        p_chatid = context.user_data.get("adm_private_chatid", None)
+        msg = context.user_data.get("adm_private_text", "")
+        if p_chatid and msg:
+            await private_message_user(p_chatid, f"[ADMIN]: {msg}", context)
+            await query.edit_message_text("Private message sent to participant.")
+        else:
+            await query.edit_message_text("No message or participant found. Nothing sent.")
+        # Clear user_data after sending
+        context.user_data["adm_private_chatid"] = None
+        context.user_data["adm_private_text"] = ""
+    else:
+        # "adm_private_confirm_no"
+        await query.edit_message_text("Private message canceled.")
+        context.user_data["adm_private_chatid"] = None
+        context.user_data["adm_private_text"] = ""
+
 
 #############################
 # Main

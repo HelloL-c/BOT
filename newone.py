@@ -1033,6 +1033,82 @@ async def admin_private_confirm_callback(update: Update, context: ContextTypes.D
         context.user_data["adm_private_chatid"] = None
         context.user_data["adm_private_text"] = ""
 
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    text = update.message.text.strip()
+    user_data = context.user_data
+
+    # Participant changing their code from /start
+    if user_data.get("change_code_from_start"):
+        new_code = text
+        update_user_code(chat_id, new_code)
+        await update.message.reply_text(f"Your code has been updated to: {new_code}")
+        user_data.pop("change_code_from_start")
+        return
+
+    # Admin sending a broadcast
+    if user_data.get("adm_broadcast"):
+        context.user_data["adm_broadcast_text"] = text
+        keyboard = [
+            [InlineKeyboardButton("Yes", callback_data="adm_broadcast_confirm_yes"),
+            InlineKeyboardButton("No", callback_data="adm_broadcast_confirm_no")]
+        ]
+        markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"Confirm broadcast message:\n{text}",
+            reply_markup=markup
+        )
+        user_data.pop("adm_broadcast")
+        return
+
+    # Admin sending a private message
+    if user_data.get("adm_private_msg"):
+        context.user_data["adm_private_text"] = text
+        p_chatid = user_data.get("adm_private_chatid")
+        if not p_chatid:
+            await update.message.reply_text("Error: No user selected.")
+            return
+        keyboard = [
+            [InlineKeyboardButton("Yes", callback_data="adm_private_confirm_yes"),
+            InlineKeyboardButton("No", callback_data="adm_private_confirm_no")]
+        ]
+        markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"Send this message to user?\n{text}",
+            reply_markup=markup
+        )
+        user_data.pop("adm_private_msg")
+        return
+
+    # Participant sending a message to admin
+    if user_data.get("p2a_typed_message"):
+        user_code = user_data.get("p2a_user_code", "UNKNOWN")
+        context.user_data["p2a_msg_text"] = text
+        keyboard = [
+            [InlineKeyboardButton("Yes", callback_data="p2a_confirm_yes"),
+            InlineKeyboardButton("No", callback_data="p2a_confirm_no")]
+        ]
+        markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"Send this message to admin?\n{text}",
+            reply_markup=markup
+        )
+        user_data.pop("p2a_typed_message")
+        return
+
+    # Admin changing a user's code
+    if user_data.get("adm_changing_code"):
+        new_code = text
+        chat_id_to_update = user_data.get("adm_change_user")
+        if chat_id_to_update:
+            update_user_code(chat_id_to_update, new_code)
+            await update.message.reply_text(f"Code updated to {new_code}")
+        user_data.pop("adm_changing_code")
+        user_data.pop("adm_change_user")
+        return
+
+    # Fallback for unhandled text
+    await update.message.reply_text("I didn't understand that. Use /start to begin.")
 
 #############################
 # Main
